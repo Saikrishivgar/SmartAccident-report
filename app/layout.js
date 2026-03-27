@@ -13,7 +13,11 @@ export default function RootLayout({ children }) {
       <body>
         <header className="siteHeader">
           <Link href="/" className="brand">
-            Smart Accident Risk System
+            <span className="brandMark" />
+            <span>
+              Smart Accident
+              <small>Command Center</small>
+            </span>
           </Link>
           <nav className="siteNav">
             <Link href="/">Home</Link>

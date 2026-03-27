@@ -9,6 +9,7 @@ import { getCitySizing } from "@/lib/citySizing";
 import { buildRoadOverlay } from "@/lib/mapOverlays";
 import { aggregateZoneRisks } from "@/lib/zoneAggregator";
 import { generateCityZones } from "@/lib/zoneGenerator";
+import { buildZoneRiskProfile } from "@/lib/zoneRiskProfile";
 
 const MapContainer = dynamic(
   () => import("react-leaflet").then((module) => module.MapContainer),
@@ -43,6 +44,21 @@ function riskColor(level) {
   if (level === "High") return "#ef4444";
   if (level === "Medium") return "#f59e0b";
   return "#22c55e";
+}
+
+function averageZoneMetric(zones, key) {
+  if (!zones?.length) return 0;
+
+  return Math.round(
+    zones.reduce((sum, zone) => sum + (Number(zone[key]) || 0), 0) / zones.length
+  );
+}
+
+function formatClock(value) {
+  return new Intl.DateTimeFormat("en-IN", {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(value);
 }
 
 function MapAutoFit({ zones, hotspots, routePlan, selectedRouteId }) {
@@ -88,23 +104,31 @@ export default function MapView({
   const [center, setCenter] = useState(null);
   const [riskData, setRiskData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [now, setNow] = useState(() => new Date());
   const requestIdRef = useRef(0);
 
-  async function fetchZoneRisk(lat, lon, cityName, insights) {
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(new Date());
+    }, 60000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  async function fetchZoneRisk(zone, cityName, insights) {
     let liveWeather = "clear";
-    let trafficCongestion = 15;
-    let accidentCount = 0;
+    let liveTrafficCongestion = 0;
 
     try {
       const trafficResponse = await fetch("/api/traffic", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat, lon })
+        body: JSON.stringify({ lat: zone.lat, lon: zone.lon })
       });
 
       if (trafficResponse.ok) {
         const trafficJson = await trafficResponse.json();
-        trafficCongestion = trafficJson.congestion ?? trafficCongestion;
+        liveTrafficCongestion = trafficJson.congestion ?? liveTrafficCongestion;
       }
     } catch {}
 
@@ -112,7 +136,7 @@ export default function MapView({
       const weatherResponse = await fetch("/api/weather", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat, lon })
+        body: JSON.stringify({ lat: zone.lat, lon: zone.lon })
       });
 
       if (weatherResponse.ok) {
@@ -120,6 +144,8 @@ export default function MapView({
         liveWeather = weatherJson.weather ?? liveWeather;
       }
     } catch {}
+
+    let cityAccidentCount = 0;
 
     try {
       const newsResponse = await fetch("/api/news", {
@@ -130,25 +156,34 @@ export default function MapView({
 
       if (newsResponse.ok) {
         const newsJson = await newsResponse.json();
-        accidentCount = newsJson.count ?? accidentCount;
+        cityAccidentCount = newsJson.count ?? cityAccidentCount;
       }
     } catch {}
+
+    const zoneProfile = buildZoneRiskProfile({
+      zone,
+      liveTrafficCongestion,
+      scenario,
+      insights
+    });
+    const accidentCount = Math.min(
+      zoneProfile.accidentCount + Math.min(cityAccidentCount, 2),
+      12
+    );
 
     const riskResponse = await fetch("/api/risk", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         weather: scenario.weather === "auto" ? liveWeather : scenario.weather,
-        trafficCongestion,
+        trafficCongestion: zoneProfile.trafficCongestion,
         accidentCount,
-        roadType:
-          scenario.roadType || insights?.dominantRoadType?.toLowerCase() || "urban road",
-        roadCondition:
-          insights?.dominantRoadCondition?.toLowerCase() || "dry",
-        speedLimit: insights?.avgSpeedLimit || 60,
+        roadType: scenario.roadType || zoneProfile.roadType,
+        roadCondition: zoneProfile.roadCondition,
+        speedLimit: zoneProfile.speedLimit,
         hour: scenario.hour,
         isWeekend: scenario.isWeekend,
-        pastAccidents: insights?.totalAccidents || 0
+        pastAccidents: zoneProfile.historicalAccidentLoad
       })
     });
 
@@ -159,8 +194,17 @@ export default function MapView({
     return {
       ...riskJson.output,
       liveWeather,
-      trafficCongestion,
-      accidentCount
+      trafficCongestion: zoneProfile.trafficCongestion,
+      accidentCount,
+      trafficLabel: zoneProfile.trafficLabel,
+      hotspotPressure: zoneProfile.hotspotPressure,
+      localAccidentSignal: zoneProfile.localAccidentSignal,
+      nearbyHotspots: zoneProfile.nearbyHotspots,
+      historicalAccidentLoad: zoneProfile.historicalAccidentLoad,
+      roadCondition: zoneProfile.roadCondition,
+      roadType: zoneProfile.roadType,
+      speedLimit: zoneProfile.speedLimit,
+      liveTrafficCongestion
     };
   }
 
@@ -204,8 +248,7 @@ export default function MapView({
         await Promise.all(
           zones.map(async (zone) => {
             const result = await fetchZoneRisk(
-              zone.lat,
-              zone.lon,
+              zone,
               input,
               insights
             );
@@ -252,13 +295,62 @@ export default function MapView({
     <section className="basicPanel">
       <div className="panelHeader">
         <div>
+          <p className="eyebrow">Spatial Intelligence</p>
           <h2>City Risk Map</h2>
           <p className="sectionText">See all generated city zones on the map.</p>
         </div>
         {loading ? <span className="pill pillWarning">Refreshing zones</span> : null}
       </div>
 
+      {riskData?.zones?.length ? (
+        <div className="mapCommandGrid">
+          <article className="mapCommandCard">
+            <span>City score</span>
+            <strong>{riskData.aggregated.cityRiskScore}</strong>
+            <p>Highest zone score detected across the active city model.</p>
+          </article>
+          <article className="mapCommandCard">
+            <span>Average traffic</span>
+            <strong>{averageZoneMetric(riskData.zones, "trafficCongestion")}%</strong>
+            <p>Mean congestion across all mapped sectors.</p>
+          </article>
+          <article className="mapCommandCard">
+            <span>Hotspots tracked</span>
+            <strong>{riskData.insights?.hotspotPoints?.length || 0}</strong>
+            <p>Historical accident markers overlaid into live zone analysis.</p>
+          </article>
+          <article className="mapCommandCard">
+            <span>Zone spread</span>
+            <strong>
+              {riskData.aggregated.minRiskScore} to {riskData.aggregated.cityRiskScore}
+            </strong>
+            <p>How far the city shifts between safer and riskier sectors.</p>
+          </article>
+        </div>
+      ) : null}
+
       <div className="mapFrame">
+        {riskData?.zones?.length ? (
+          <div className="mapHud">
+            <div className="mapHudGroup">
+              <span className="mapHudLabel">Live city</span>
+              <strong>{riskData.city}</strong>
+            </div>
+            <div className="mapHudGroup">
+              <span className="mapHudLabel">Conditions</span>
+              <strong>{scenario.isWeekend ? "Weekend" : "Weekday"} • {scenario.hour}:00</strong>
+            </div>
+            <div className="mapHudGroup">
+              <span className="mapHudLabel">Avg load</span>
+              <strong>{averageZoneMetric(riskData.zones, "trafficCongestion")}% traffic</strong>
+            </div>
+            <div className="mapHudGroup">
+              <span className="mapHudLabel">Live time</span>
+              <strong>{formatClock(now)}</strong>
+            </div>
+          </div>
+        ) : null}
+
         {enabled && center ? (
           <MapContainer
             key={`${center[0]}-${center[1]}`}
@@ -374,6 +466,12 @@ export default function MapView({
                   <br />
                   Distance: {option.distanceKm} km
                   <br />
+                  ETA: {option.durationMin ? `${option.durationMin} min` : "--"}
+                  <br />
+                  Arrival: {option.durationMin
+                    ? formatClock(new Date(now.getTime() + option.durationMin * 60000))
+                    : "--"}
+                  <br />
                   Route score: {option.score}
                   <br />
                   Corridor: {option.roadName}
@@ -427,7 +525,10 @@ export default function MapView({
           {riskData.zones.map((zone) => (
             <article className="zoneCard" key={`${zone.name}-${zone.lat}-${zone.lon}-card`}>
               <div className="zoneTitleRow">
-                <h4>{zone.name}</h4>
+                <div className="zoneIdentity">
+                  <h4>{zone.name}</h4>
+                  <span className="zoneMicroMeta">{zone.roadType}</span>
+                </div>
                 <span
                   className="pill"
                   style={{
@@ -438,7 +539,25 @@ export default function MapView({
                   {zone.riskLevel}
                 </span>
               </div>
-              <p>Score {zone.riskScore} with traffic congestion at {zone.trafficCongestion}%.</p>
+              <div className="zoneMetricRow">
+                <div className="zoneMetricPill">
+                  <span>Score</span>
+                  <strong>{zone.riskScore}</strong>
+                </div>
+                <div className="zoneMetricPill">
+                  <span>Traffic</span>
+                  <strong>{zone.trafficCongestion}%</strong>
+                </div>
+                <div className="zoneMetricPill">
+                  <span>History</span>
+                  <strong>{zone.historicalAccidentLoad}</strong>
+                </div>
+              </div>
+              <p>
+                {zone.trafficLabel} traffic, {zone.localAccidentSignal} nearby hotspot
+                {zone.localAccidentSignal === 1 ? "" : "s"}, and {zone.roadCondition} road
+                conditions.
+              </p>
             </article>
           ))}
           </div>

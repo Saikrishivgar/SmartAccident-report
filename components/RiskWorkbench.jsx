@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import MapView from "@/components/MapView";
 import SafetyNotifier from "@/components/SafetyNotifier";
@@ -20,6 +20,13 @@ function levelClass(level) {
   return "statusLow";
 }
 
+function formatClock(value) {
+  return new Intl.DateTimeFormat("en-IN", {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(value);
+}
+
 export default function RiskWorkbench() {
   const [city, setCity] = useState("Chennai");
   const [scenario, setScenario] = useState(defaultScenario);
@@ -36,6 +43,15 @@ export default function RiskWorkbench() {
   const [routePlan, setRoutePlan] = useState(null);
   const [selectedRouteId, setSelectedRouteId] = useState(null);
   const [routeLoading, setRouteLoading] = useState(false);
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(new Date());
+    }, 60000);
+
+    return () => window.clearInterval(timer);
+  }, []);
 
   async function runAssessment() {
     const normalizedCity = city.trim();
@@ -132,7 +148,7 @@ export default function RiskWorkbench() {
 
       const startGeo = await startRes.json();
       const destinationGeo = await destinationRes.json();
-      const planned = planRiskAwareRoutes({
+      const routePayload = {
         start: { lat: startGeo.lat, lon: startGeo.lon },
         destination: { lat: destinationGeo.lat, lon: destinationGeo.lon },
         center: summary.zones?.[0]
@@ -140,7 +156,16 @@ export default function RiskWorkbench() {
           : null,
         roads: summary.roads || [],
         hotspots: summary.insights?.hotspotPoints || []
+      };
+      const routedRes = await fetch("/api/route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(routePayload)
       });
+
+      const planned = routedRes.ok
+        ? await routedRes.json()
+        : planRiskAwareRoutes(routePayload);
 
       setRoutePlan(planned);
       setSelectedRouteId(planned?.bestRouteId || null);
@@ -229,12 +254,49 @@ export default function RiskWorkbench() {
 
   return (
     <div className="simplePage">
-      <section className="simpleHeader">
-        <h1>Smart Accident Risk Prediction</h1>
-        <p>Check accident risk by city and view all risk zones directly on the map.</p>
+      <section className="workspaceHero">
+        <div className="workspaceHeroCopy">
+          <p className="eyebrow">Urban Safety Intelligence</p>
+          <h1>Smart Accident Risk Prediction</h1>
+          <p>
+            Analyze city traffic exposure, hotspot density, and route safety from one
+            premium control surface built for real operations teams.
+          </p>
+        </div>
+
+        <div className="heroMetrics">
+          <article className="heroMetricCard">
+            <span>Live zone model</span>
+            <strong>{summary?.zones?.length || 5} sectors</strong>
+            <p>Center, north, south, east, and west risk mapping.</p>
+          </article>
+          <article className="heroMetricCard">
+            <span>Route intelligence</span>
+            <strong>{routePlan?.options?.length || 3} options</strong>
+            <p>Compare safer corridors before highlighting on the map.</p>
+          </article>
+          <article className="heroMetricCard">
+            <span>Current scenario</span>
+            <strong>{city}</strong>
+            <p>
+              {scenario.weather === "auto" ? "Auto weather" : scenario.weather},{" "}
+              {scenario.hour}:00, {scenario.isWeekend ? "weekend" : "weekday"}.
+            </p>
+          </article>
+        </div>
       </section>
 
-      <section className="basicPanel">
+      <section className="basicPanel commandPanel">
+        <div className="panelHeader">
+          <div>
+            <p className="eyebrow">Control Surface</p>
+            <h2>Risk Analysis Setup</h2>
+            <p className="sectionText">
+              Configure the city, environment, and road context before running analysis.
+            </p>
+          </div>
+        </div>
+
         <div className="basicForm">
           <label className="field">
             <span>City</span>
@@ -401,6 +463,7 @@ export default function RiskWorkbench() {
           <section className="basicPanel">
             <div className="panelHeader">
               <div>
+                <p className="eyebrow">Navigation Layer</p>
                 <h2>Route Tracking</h2>
                 <p className="sectionText">
                   Enter a start and destination to compare safer route options.
@@ -448,6 +511,12 @@ export default function RiskWorkbench() {
                     <p>{option.summary}</p>
                     <p>Road used: {option.roadName}</p>
                     <p>Route score: {option.score}</p>
+                    <p>ETA: {option.durationMin ? `${option.durationMin} min` : "--"}</p>
+                    <p>
+                      Arrival: {option.durationMin
+                        ? formatClock(new Date(now.getTime() + option.durationMin * 60000))
+                        : "--"}
+                    </p>
                     <button
                       className="secondaryButton"
                       type="button"
@@ -462,7 +531,12 @@ export default function RiskWorkbench() {
           </section>
 
           <section className="basicPanel">
-            <h2>City Dataset Summary</h2>
+            <div className="panelHeader">
+              <div>
+                <p className="eyebrow">Dataset Snapshot</p>
+                <h2>City Dataset Summary</h2>
+              </div>
+            </div>
             <div className="summaryGrid">
               <div className="summaryCard">
                 <span>Common Road Type</span>
