@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "babel-plugin-react-compiler": "1.0.0",
-    "eslint": "^9",
-    "eslint-config-next": "16.1.6"
+    "eslint": "^10.1.0",
+    "eslint-config-next": "^0.2.4"
   }
 }
