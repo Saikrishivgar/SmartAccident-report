@@ -2,201 +2,448 @@
 
 import dynamic from "next/dynamic";
 import "leaflet/dist/leaflet.css";
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useMap } from "react-leaflet";
 
-import { generateCityZones } from "@/lib/zoneGenerator";
 import { getCitySizing } from "@/lib/citySizing";
+import { buildRoadOverlay } from "@/lib/mapOverlays";
 import { aggregateZoneRisks } from "@/lib/zoneAggregator";
+import { generateCityZones } from "@/lib/zoneGenerator";
 
 const MapContainer = dynamic(
-  () => import("react-leaflet").then((m) => m.MapContainer),
+  () => import("react-leaflet").then((module) => module.MapContainer),
   { ssr: false }
 );
 const TileLayer = dynamic(
-  () => import("react-leaflet").then((m) => m.TileLayer),
+  () => import("react-leaflet").then((module) => module.TileLayer),
   { ssr: false }
 );
 const Circle = dynamic(
-  () => import("react-leaflet").then((m) => m.Circle),
+  () => import("react-leaflet").then((module) => module.Circle),
+  { ssr: false }
+);
+const CircleMarker = dynamic(
+  () => import("react-leaflet").then((module) => module.CircleMarker),
   { ssr: false }
 );
 const Popup = dynamic(
-  () => import("react-leaflet").then((m) => m.Popup),
+  () => import("react-leaflet").then((module) => module.Popup),
+  { ssr: false }
+);
+const Polyline = dynamic(
+  () => import("react-leaflet").then((module) => module.Polyline),
+  { ssr: false }
+);
+const Tooltip = dynamic(
+  () => import("react-leaflet").then((module) => module.Tooltip),
   { ssr: false }
 );
 
-export default function MapView() {
-  const [city, setCity] = useState("Chennai");
+function riskColor(level) {
+  if (level === "High") return "#ef4444";
+  if (level === "Medium") return "#f59e0b";
+  return "#22c55e";
+}
+
+function MapAutoFit({ zones, hotspots, routePlan, selectedRouteId }) {
+  const map = useMap();
+  const routePoints = useMemo(
+    () =>
+      (routePlan?.options || [])
+        .filter((option) => !selectedRouteId || option.id === selectedRouteId)
+        .flatMap((option) =>
+        option.points.map((point) => [point.lat, point.lon])
+      ),
+    [routePlan, selectedRouteId]
+  );
+
+  useEffect(() => {
+    const points = [
+      ...(zones || []).map((zone) => [zone.lat, zone.lon]),
+      ...(hotspots || []).map((spot) => [spot.lat, spot.lon]),
+      ...routePoints
+    ];
+
+    if (!points.length) return;
+
+    map.fitBounds(points, {
+      padding: [30, 30]
+    });
+  }, [map, zones, hotspots, routePoints]);
+
+  return null;
+}
+
+export default function MapView({
+  city,
+  scenario,
+  refreshKey,
+  enabled = false,
+  routePlan = null,
+  selectedRouteId = null,
+  onAnalysisStart,
+  onAnalysisComplete,
+  onAnalysisError
+}) {
   const [center, setCenter] = useState(null);
   const [riskData, setRiskData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const requestIdRef = useRef(0);
 
-  async function fetchZoneRisk(lat, lon, cityName) {
-    let weather = "clear";
-    let trafficCongestion = 0;
+  async function fetchZoneRisk(lat, lon, cityName, insights) {
+    let liveWeather = "clear";
+    let trafficCongestion = 15;
     let accidentCount = 0;
 
     try {
-      const t = await fetch("/api/traffic", {
+      const trafficResponse = await fetch("/api/traffic", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lat, lon })
       });
-      if (t.ok) trafficCongestion = (await t.json()).congestion ?? 0;
+
+      if (trafficResponse.ok) {
+        const trafficJson = await trafficResponse.json();
+        trafficCongestion = trafficJson.congestion ?? trafficCongestion;
+      }
     } catch {}
 
     try {
-      const w = await fetch("/api/weather", {
+      const weatherResponse = await fetch("/api/weather", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lat, lon })
       });
-      if (w.ok) weather = (await w.json()).weather ?? "clear";
+
+      if (weatherResponse.ok) {
+        const weatherJson = await weatherResponse.json();
+        liveWeather = weatherJson.weather ?? liveWeather;
+      }
     } catch {}
 
     try {
-      const n = await fetch("/api/news", {
+      const newsResponse = await fetch("/api/news", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ city: cityName })
       });
-      if (n.ok) accidentCount = (await n.json()).count ?? 0;
+
+      if (newsResponse.ok) {
+        const newsJson = await newsResponse.json();
+        accidentCount = newsJson.count ?? accidentCount;
+      }
     } catch {}
 
-    const r = await fetch("/api/risk", {
+    const riskResponse = await fetch("/api/risk", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        weather,
+        weather: scenario.weather === "auto" ? liveWeather : scenario.weather,
         trafficCongestion,
-        accidentCount
+        accidentCount,
+        roadType:
+          scenario.roadType || insights?.dominantRoadType?.toLowerCase() || "urban road",
+        roadCondition:
+          insights?.dominantRoadCondition?.toLowerCase() || "dry",
+        speedLimit: insights?.avgSpeedLimit || 60,
+        hour: scenario.hour,
+        isWeekend: scenario.isWeekend,
+        pastAccidents: insights?.totalAccidents || 0
       })
     });
 
-    return r.ok ? await r.json() : null;
+    if (!riskResponse.ok) return null;
+
+    const riskJson = await riskResponse.json();
+
+    return {
+      ...riskJson.output,
+      liveWeather,
+      trafficCongestion,
+      accidentCount
+    };
   }
 
-  async function fetchCityRisk(lat, lon, cityName, bbox) {
+  const runCityAnalysis = useEffectEvent(async () => {
+    const input = city.trim();
+    if (!enabled || !input) return;
+
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     setLoading(true);
+    onAnalysisStart?.();
 
-    const { zoneOffset, circleRadius } = getCitySizing(bbox);
-    const zones = generateCityZones(lat, lon, zoneOffset, bbox);
+    try {
+      const [geoRes, accidentsRes] = await Promise.all([
+        fetch("/api/geocode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ city: input })
+        }),
+        fetch("/api/accidents", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ city: input })
+        })
+      ]);
 
-    const zoneResults = [];
+      if (!geoRes.ok) {
+        throw new Error("City not found. Try a valid Indian city name.");
+      }
 
-    for (const zone of zones) {
-      const result = await fetchZoneRisk(zone.lat, zone.lon, cityName);
-      if (result) {
-        zoneResults.push({
-          ...zone,
-          ...result
-        });
+      const geo = await geoRes.json();
+      const accidentsJson = accidentsRes.ok ? await accidentsRes.json() : null;
+      const insights = accidentsJson?.insights || null;
+      const newCenter = [geo.lat, geo.lon];
+      const { zoneOffset, circleRadius } = getCitySizing(geo.bbox);
+      const zones = generateCityZones(geo.lat, geo.lon, zoneOffset, geo.bbox);
+
+      setCenter(newCenter);
+
+      const zoneResults = (
+        await Promise.all(
+          zones.map(async (zone) => {
+            const result = await fetchZoneRisk(
+              zone.lat,
+              zone.lon,
+              input,
+              insights
+            );
+
+            return result
+              ? {
+                  ...zone,
+                  ...result
+                }
+              : null;
+          })
+        )
+      ).filter(Boolean);
+
+      const aggregated = aggregateZoneRisks(zoneResults);
+      const summary = {
+        city: input,
+        zones: zoneResults,
+        aggregated,
+        circleRadius,
+        insights,
+        roads: buildRoadOverlay(newCenter, zoneResults, insights)
+      };
+
+      if (requestId !== requestIdRef.current) return;
+      setRiskData(summary);
+      onAnalysisComplete?.(summary);
+    } catch (error) {
+      if (requestId !== requestIdRef.current) return;
+      setRiskData(null);
+      onAnalysisError?.(error.message);
+    } finally {
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
       }
     }
-
-    const aggregated = aggregateZoneRisks(zoneResults);
-
-    setRiskData({
-      city: cityName,
-      zones: zoneResults,
-      aggregated,
-      circleRadius
-    });
-
-    setLoading(false);
-  }
-
-  async function handleCheck() {
-    const input = city.trim();
-    if (!input) return;
-
-    const geoRes = await fetch("/api/geocode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ city: input })
-    });
-
-    if (!geoRes.ok) {
-      alert("Invalid city");
-      return;
-    }
-
-    const geo = await geoRes.json();
-
-    const newCenter = [geo.lat, geo.lon];
-    setCenter(newCenter);
-
-    await fetchCityRisk(geo.lat, geo.lon, input, geo.bbox);
-  }
-
-  function handleKeyDown(e) {
-    if (e.key === "Enter") handleCheck();
-  }
+  });
 
   useEffect(() => {
-    handleCheck();
-  }, []);
-
-  const getColor = (lvl) => {
-    if (lvl === "High") return "red";
-    if (lvl === "Medium") return "orange";
-    return "green";
-  };
+    runCityAnalysis();
+  }, [enabled, refreshKey]);
 
   return (
-    <>
-      <div style={{ marginBottom: "12px" }}>
-        <input
-          value={city}
-          onChange={(e) => setCity(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Enter Indian city"
-          style={{ padding: "6px", width: "220px" }}
-        />
-        <button
-          onClick={handleCheck}
-          style={{ marginLeft: "8px", padding: "6px 12px" }}
-        >
-          Check Risk
-        </button>
+    <section className="basicPanel">
+      <div className="panelHeader">
+        <div>
+          <h2>City Risk Map</h2>
+          <p className="sectionText">See all generated city zones on the map.</p>
+        </div>
+        {loading ? <span className="pill pillWarning">Refreshing zones</span> : null}
       </div>
 
-      {loading && <p>Calculating city-wide risk…</p>}
+      <div className="mapFrame">
+        {enabled && center ? (
+          <MapContainer
+            key={`${center[0]}-${center[1]}`}
+            center={center}
+            zoom={11}
+            style={{ height: "100%", width: "100%" }}
+          >
+            <MapAutoFit
+              zones={riskData?.zones}
+              hotspots={riskData?.insights?.hotspotPoints}
+              routePlan={routePlan}
+              selectedRouteId={selectedRouteId}
+            />
+            <TileLayer
+              attribution="© OpenStreetMap contributors"
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
 
-      {center && (
-        <MapContainer
-          key={`${center[0]}-${center[1]}`}
-          center={center}
-          zoom={11}
-          style={{ height: "500px", width: "100%" }}
-        >
-          <TileLayer
-            attribution="© OpenStreetMap contributors"
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
+            {riskData?.roads?.map((road) => (
+              <Polyline
+                key={road.id}
+                positions={road.points}
+                pathOptions={{
+                  color: road.color,
+                  weight: road.level === "High" ? 8 : road.level === "Medium" ? 6 : 4,
+                  opacity: 0.92
+                }}
+              >
+                <Tooltip sticky>
+                  {road.name}
+                  <br />
+                  Alert level: {road.level}
+                  <br />
+                  Road risk score: {road.score}
+                </Tooltip>
+              </Polyline>
+            ))}
 
-          {riskData?.zones &&
-            riskData.zones.map((zone) => (
+            {riskData?.zones?.map((zone) => (
               <Circle
                 key={`${zone.name}-${zone.lat}-${zone.lon}`}
                 center={[zone.lat, zone.lon]}
                 radius={riskData.circleRadius}
                 pathOptions={{
-                  color: getColor(zone.riskLevel),
+                  color: riskColor(zone.riskLevel),
+                  fillColor: riskColor(zone.riskLevel),
                   fillOpacity: 0.35
                 }}
               >
                 <Popup>
-                  Zone: {zone.name}
+                  <strong>{zone.name}</strong>
                   <br />
-                  Risk Level: {zone.riskLevel}
+                  Risk: {zone.riskLevel} ({zone.riskScore})
                   <br />
-                  Risk Score: {zone.riskScore}
+                  Weather: {zone.liveWeather}
+                  <br />
+                  Traffic: {zone.trafficCongestion}%
+                  <br />
+                  Incident signal: {zone.accidentCount}
                 </Popup>
               </Circle>
             ))}
-        </MapContainer>
-      )}
-    </>
+
+            {riskData?.insights?.hotspotPoints?.map((spot) => (
+              <CircleMarker
+                key={spot.id}
+                center={[spot.lat, spot.lon]}
+                radius={Math.min(14, Math.max(6, 4 + spot.hazardScore / 3))}
+                pathOptions={{
+                  color:
+                    spot.severity === "Fatal"
+                      ? "#ef4444"
+                      : spot.severity === "Serious"
+                        ? "#f59e0b"
+                        : "#38bdf8",
+                  fillColor:
+                    spot.severity === "Fatal"
+                      ? "#ef4444"
+                      : spot.severity === "Serious"
+                        ? "#f59e0b"
+                        : "#38bdf8",
+                  fillOpacity: 0.85,
+                  weight: 1
+                }}
+              >
+                <Popup>
+                  Accident hotspot
+                  <br />
+                  Severity: {spot.severity}
+                  <br />
+                  Weather: {spot.weather}
+                  <br />
+                  Road: {spot.roadType}
+                  <br />
+                  Casualties: {spot.casualties}, Fatalities: {spot.fatalities}
+                </Popup>
+              </CircleMarker>
+            ))}
+
+            {routePlan?.options?.map((option) => (
+              <Polyline
+                key={option.id}
+                positions={option.points.map((point) => [point.lat, point.lon])}
+                pathOptions={{
+                  color: selectedRouteId === option.id ? "#38bdf8" : "#cbd5e1",
+                  weight: selectedRouteId === option.id ? 7 : 3,
+                  dashArray: selectedRouteId === option.id ? undefined : "10 8",
+                  opacity: selectedRouteId === option.id ? 0.95 : 0.45
+                }}
+              >
+                <Popup>
+                  {option.name}
+                  <br />
+                  Distance: {option.distanceKm} km
+                  <br />
+                  Route score: {option.score}
+                  <br />
+                  Corridor: {option.roadName}
+                </Popup>
+              </Polyline>
+            ))}
+
+            {routePlan?.options
+              ?.filter((option) => option.id === selectedRouteId)
+              .flatMap((option) =>
+              option.points.map((point, index) => (
+                <CircleMarker
+                  key={`${option.id}-${index}-${point.lat}-${point.lon}`}
+                  center={[point.lat, point.lon]}
+                  radius={6}
+                  pathOptions={{
+                    color: "#38bdf8",
+                    fillColor: "#38bdf8",
+                    fillOpacity: 0.9
+                  }}
+                >
+                  <Tooltip permanent={index === 0 || index === option.points.length - 1} direction="top">
+                    {index === 0
+                      ? "Start"
+                      : index === option.points.length - 1
+                        ? "Destination"
+                        : option.name}
+                  </Tooltip>
+                </CircleMarker>
+              ))
+            )}
+          </MapContainer>
+        ) : (
+          <div className="emptyMapState">
+            <h4>Run analysis to load the map</h4>
+            <p>The map will display center, north, south, east, and west zones.</p>
+          </div>
+        )}
+      </div>
+
+      {riskData?.zones?.length ? (
+        <>
+          <div className="mapLegend">
+            <span><i className="legendSwatch legendHigh" /> High-risk road</span>
+            <span><i className="legendSwatch legendMedium" /> Medium-risk road</span>
+            <span><i className="legendSwatch legendLow" /> Lower-risk road</span>
+            <span><i className="legendDot legendHotspot" /> Accident hotspot</span>
+          </div>
+
+          <div className="zoneGrid">
+          {riskData.zones.map((zone) => (
+            <article className="zoneCard" key={`${zone.name}-${zone.lat}-${zone.lon}-card`}>
+              <div className="zoneTitleRow">
+                <h4>{zone.name}</h4>
+                <span
+                  className="pill"
+                  style={{
+                    background: `${riskColor(zone.riskLevel)}22`,
+                    color: riskColor(zone.riskLevel)
+                  }}
+                >
+                  {zone.riskLevel}
+                </span>
+              </div>
+              <p>Score {zone.riskScore} with traffic congestion at {zone.trafficCongestion}%.</p>
+            </article>
+          ))}
+          </div>
+        </>
+      ) : null}
+    </section>
   );
 }

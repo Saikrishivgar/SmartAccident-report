@@ -1,7 +1,8 @@
 import "./globals.css";
+import Link from "next/link";
 
 export const metadata = {
-  title: "Smart Accident & Risk Prediction System",
+  title: "Smart Accident Risk System",
   description:
     "Predict accident-prone areas using weather, time, traffic, and historical data"
 };
@@ -9,7 +10,19 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <header className="siteHeader">
+          <Link href="/" className="brand">
+            Smart Accident Risk System
+          </Link>
+          <nav className="siteNav">
+            <Link href="/">Home</Link>
+            <Link href="/dashboard">Dashboard</Link>
+            <Link href="/alerts">Alerts</Link>
+          </nav>
+        </header>
+        {children}
+      </body>
     </html>
   );
 }

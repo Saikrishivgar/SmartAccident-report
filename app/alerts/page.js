@@ -1,53 +1,31 @@
-"use client";
+import AlertsCenter from "@/components/AlertsCenter";
 
-import { useEffect, useState } from "react";
+const alertGuides = [
+  "High risk means poor visibility, heavy traffic, or dangerous road conditions are combining strongly.",
+  "Medium risk signals caution: one or two factors are elevated and deserve route or speed adjustments.",
+  "Low risk does not mean zero risk. It means the observed factors are comparatively safer."
+];
 
 export default function Alerts() {
-  const [data, setData] = useState(null);
-
-  useEffect(() => {
-    async function load() {
-      const res = await fetch("/api/risk", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          weather: "rain",
-          hour: new Date().getHours(),
-          isWeekend: false,
-          pastAccidents: 15
-        })
-      });
-
-      const json = await res.json();
-      setData(json.output);
-    }
-
-    load();
-  }, []);
-
-  if (!data) return null;
-
   return (
-    <main style={{ padding: "20px" }}>
-      <h2>Risk Alerts</h2>
-
-      {data.riskLevel === "High" && (
-        <div style={{ color: "red" }}>
-          High accident risk detected. Avoid this area if possible.
+    <main className="pageShell">
+      <section className="panel">
+        <div className="panelHeader">
+          <div>
+            <p className="eyebrow">Alert Guidance</p>
+            <h1>Interpreting accident risk alerts</h1>
+          </div>
         </div>
-      )}
-
-      {data.riskLevel === "Medium" && (
-        <div style={{ color: "orange" }}>
-          Moderate risk detected. Drive with caution.
+        <div className="insightGrid">
+          {alertGuides.map((guide) => (
+            <article className="insightCard" key={guide}>
+              <p>{guide}</p>
+            </article>
+          ))}
         </div>
-      )}
+      </section>
 
-      {data.riskLevel === "Low" && (
-        <div style={{ color: "green" }}>
-          Low risk detected. Normal driving conditions.
-        </div>
-      )}
+      <AlertsCenter />
     </main>
   );
 }

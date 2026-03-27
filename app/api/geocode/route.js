@@ -1,6 +1,21 @@
+import { getCityGeoProfile } from "@/lib/accidentInsights";
+
 export async function POST(req) {
+  let city = "";
+
   try {
-    const { city } = await req.json();
+    const payload = await req.json();
+    city = payload.city || "";
+    const localMatch = getCityGeoProfile(city);
+
+    if (localMatch?.matchedCity) {
+      return Response.json({
+        lat: localMatch.lat,
+        lon: localMatch.lon,
+        bbox: localMatch.bbox,
+        source: "dataset"
+      });
+    }
 
     const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
       city
@@ -15,10 +30,16 @@ export async function POST(req) {
     const data = await res.json();
 
     if (!data || data.length === 0) {
-      return Response.json(
-        { error: "City not found in India" },
-        { status: 404 }
-      );
+      if (localMatch) {
+        return Response.json({
+          lat: localMatch.lat,
+          lon: localMatch.lon,
+          bbox: localMatch.bbox,
+          source: "dataset-fallback"
+        });
+      }
+
+      return Response.json({ error: "City not found in India" }, { status: 404 });
     }
 
     const place = data[0];
@@ -30,13 +51,25 @@ export async function POST(req) {
       );
     }
 
-  return Response.json({
-  lat: parseFloat(place.lat),
-  lon: parseFloat(place.lon),
-  bbox: place.boundingbox.map(Number)
-});
+    return Response.json({
+      lat: parseFloat(place.lat),
+      lon: parseFloat(place.lon),
+      bbox: place.boundingbox.map(Number),
+      source: "nominatim"
+    });
 
   } catch {
+    const fallback = getCityGeoProfile(city);
+
+    if (fallback) {
+      return Response.json({
+        lat: fallback.lat,
+        lon: fallback.lon,
+        bbox: fallback.bbox,
+        source: "dataset-fallback"
+      });
+    }
+
     return Response.json({ error: "Geocoding failed" }, { status: 500 });
   }
 }
